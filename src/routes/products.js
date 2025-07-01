@@ -1,0 +1,362 @@
+/**
+ * Product routes module
+ * 
+ * Handles all product-related API endpoints including:
+ * - GET /api/products - Retrieve paginated product list with caching
+ * - GET /api/products/:id - Retrieve specific product by ID
+ * 
+ * Features:
+ * - Redis caching for improved performance
+ * - Input validation and sanitization
+ * - Comprehensive error handling
+ * - Detailed request/response logging
+ * 
+ * @author Hackathon Team
+ * @version 1.0.0
+ */
+
+/**
+ * Input validation schemas for request parameters
+ */
+const querySchema = {
+  type: 'object',
+  properties: {
+    page: { 
+      type: 'string', 
+      pattern: '^[1-9]\\d*$',
+      description: 'Page number (must be positive integer)'
+    },
+    limit: { 
+      type: 'string', 
+      pattern: '^[1-9]\\d*$',
+      description: 'Items per page (must be positive integer, max 100)'
+    }
+  }
+};
+
+const paramsSchema = {
+  type: 'object',
+  properties: {
+    id: { 
+      type: 'string', 
+      pattern: '^[1-9]\\d*$',
+      description: 'Product ID (must be positive integer)'
+    }
+  },
+  required: ['id']
+};
+
+/**
+ * Utility function to validate and sanitize pagination parameters
+ * @param {Object} query - Request query parameters
+ * @returns {Object} Sanitized pagination parameters
+ */
+function validatePaginationParams(query) {
+  const page = parseInt(query.page) || 1;
+  const limit = parseInt(query.limit) || 10;
+  
+  // Validate page number
+  if (page < 1) {
+    throw new Error('Page number must be greater than 0');
+  }
+  
+  // Validate and limit the maximum items per page
+  if (limit < 1) {
+    throw new Error('Limit must be greater than 0');
+  }
+  if (limit > 100) {
+    throw new Error('Limit cannot exceed 100 items per page');
+  }
+  
+  return { page, limit };
+}
+
+/**
+ * Utility function to execute database queries with proper error handling
+ * @param {Object} fastify - Fastify instance
+ * @param {string} query - SQL query string
+ * @param {Array} params - Query parameters
+ * @param {string} operation - Description of the operation for logging
+ * @returns {Promise<Object>} Query result
+ */
+async function executeQuery(fastify, query, params, operation) {
+  return new Promise((resolve, reject) => {
+    fastify.pg.query(query, params, (err, result) => {
+      if (err) {
+        fastify.log.error(`Database error during ${operation}:`, {
+          error: err.message,
+          code: err.code,
+          detail: err.detail,
+          hint: err.hint,
+          query: query,
+          params: params
+        });
+        reject(new Error(`Database operation failed: ${err.message}`));
+      } else {
+        resolve(result);
+      }
+    });
+  });
+}
+
+/**
+ * Main product routes function
+ * @param {Object} fastify - Fastify instance
+ * @param {Object} opts - Route options
+ */
+export default async function productRoutes(fastify, opts) {
+  
+  /**
+   * GET /api/products
+   * Retrieve paginated list of products with Redis caching
+   * 
+   * Query Parameters:
+   * - page: Page number (default: 1)
+   * - limit: Items per page (default: 10, max: 100)
+   * 
+   * Response:
+   * - products: Array of product objects
+   * - page: Current page number
+   * - limit: Items per page
+   * - total: Total number of products (if available)
+   */
+  fastify.get('/', {
+    schema: {
+      querystring: querySchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            products: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  name: { type: 'string' },
+                  description: { type: 'string' },
+                  price: { type: 'number' },
+                  image_url: { type: 'string' }
+                }
+              }
+            },
+            page: { type: 'integer' },
+            limit: { type: 'integer' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const startTime = Date.now();
+    
+    try {
+      // Validate and sanitize input parameters
+      const { page, limit } = validatePaginationParams(request.query);
+      const offset = (page - 1) * limit;
+      
+      fastify.log.info('Fetching products', {
+        page,
+        limit,
+        offset,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      // Generate cache key for this specific query
+      const cacheKey = `products:page:${page}:limit:${limit}`;
+      
+      // Try to get data from Redis cache first
+      try {
+        const cachedData = await fastify.redis.get(cacheKey);
+        if (cachedData) {
+          fastify.log.info('Cache hit for products', { cacheKey, page, limit });
+          const result = JSON.parse(cachedData);
+          
+          reply.header('X-Cache', 'HIT');
+          reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+          
+          return result;
+        }
+      } catch (cacheError) {
+        fastify.log.warn('Redis cache error, proceeding with database query', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      // Cache miss - fetch from database
+      fastify.log.info('Cache miss, fetching from database', { cacheKey, page, limit });
+      
+      const result = await executeQuery(
+        fastify,
+        'SELECT * FROM products ORDER BY id LIMIT $1 OFFSET $2',
+        [limit, offset],
+        'fetching products'
+      );
+
+      const response = {
+        products: result.rows,
+        page,
+        limit,
+        total: result.rowCount
+      };
+
+      // Cache the result in Redis for 60 seconds
+      try {
+        await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 60);
+        fastify.log.info('Cached products data', { cacheKey, ttl: 60 });
+      } catch (cacheError) {
+        fastify.log.warn('Failed to cache products data', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      reply.header('X-Cache', 'MISS');
+      reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+      
+      fastify.log.info('Products fetched successfully', {
+        count: result.rows.length,
+        page,
+        limit,
+        responseTime: `${Date.now() - startTime}ms`
+      });
+
+      return response;
+
+    } catch (error) {
+      fastify.log.error('Error fetching products:', {
+        error: error.message,
+        stack: error.stack,
+        query: request.query,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      // Determine appropriate error response
+      if (error.message.includes('Page number must be') || 
+          error.message.includes('Limit must be') ||
+          error.message.includes('Limit cannot exceed')) {
+        reply.code(400).send({
+          error: 'Bad Request',
+          message: error.message,
+          details: 'Invalid pagination parameters'
+        });
+      } else {
+        reply.code(500).send({
+          error: 'Internal Server Error',
+          message: 'Failed to fetch products',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    }
+  });
+
+  /**
+   * GET /api/products/:id
+   * Retrieve a specific product by ID
+   * 
+   * Parameters:
+   * - id: Product ID (positive integer)
+   * 
+   * Response:
+   * - Product object or 404 if not found
+   */
+  fastify.get('/:id', {
+    schema: {
+      params: paramsSchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            price: { type: 'number' },
+            image_url: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const startTime = Date.now();
+    
+    try {
+      const { id } = request.params;
+      
+      // Validate ID parameter
+      const productId = parseInt(id);
+      if (isNaN(productId) || productId < 1) {
+        fastify.log.warn('Invalid product ID provided', {
+          id,
+          userAgent: request.headers['user-agent'],
+          ip: request.ip
+        });
+        
+        reply.code(400).send({
+          error: 'Bad Request',
+          message: 'Product ID must be a positive integer'
+        });
+        return;
+      }
+
+      fastify.log.info('Fetching product by ID', {
+        productId,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      const result = await executeQuery(
+        fastify,
+        'SELECT * FROM products WHERE id = $1',
+        [productId],
+        'fetching product by ID'
+      );
+
+      if (!result.rows.length) {
+        fastify.log.info('Product not found', { productId });
+        
+        reply.code(404).send({
+          error: 'Not Found',
+          message: `Product with ID ${productId} not found`
+        });
+        return;
+      }
+
+      const product = result.rows[0];
+      
+      reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+      
+      fastify.log.info('Product fetched successfully', {
+        productId,
+        productName: product.name,
+        responseTime: `${Date.now() - startTime}ms`
+      });
+
+      return product;
+
+    } catch (error) {
+      fastify.log.error('Error fetching product by ID:', {
+        error: error.message,
+        stack: error.stack,
+        params: request.params,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      reply.code(500).send({
+        error: 'Internal Server Error',
+        message: 'Failed to fetch product',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  });
+}
+  
