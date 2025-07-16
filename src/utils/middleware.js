@@ -18,7 +18,7 @@
  */
 export function requestLogger(fastify) {
   return (request, reply, done) => {
-    const startTime = Date.now();
+    const startTime = process.hrtime.bigint();
     
     // Store start time for response logging
     request.startTime = startTime;
@@ -109,8 +109,8 @@ export function securityHeaders(fastify) {
  */
 export function rateLimiter(fastify, options = {}) {
   const {
-    windowMs = 15 * 60 * 1000, // 15 minutes
-    maxRequests = 100, // max requests per window
+    windowMs = 5 * 60 * 1000, // 15 minutes
+    maxRequests = 10000, // max requests per window
     skipSuccessfulRequests = false,
     skipFailedRequests = false
   } = options;

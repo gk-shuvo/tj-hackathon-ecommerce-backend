@@ -71,9 +71,16 @@ npm run dev
 
 - `GET /api/products` - Get paginated product list
 - `GET /api/products/:id` - Get product by ID
+- `GET /api/products/search` - Search products using PostgreSQL full-text search
 
 ### Query Parameters
 
+**For `/api/products`:**
+- `page` - Page number (default: 1, must be positive integer)
+- `limit` - Items per page (default: 10, max: 100, must be positive integer)
+
+**For `/api/products/search`:**
+- `search` - Search term for product name and description (required, 1-100 characters)
 - `page` - Page number (default: 1, must be positive integer)
 - `limit` - Items per page (default: 10, max: 100, must be positive integer)
 
@@ -187,7 +194,7 @@ The API is built with:
 
 ## Database
 
-The application uses a simple `products` table:
+The application uses a `products` table with full-text search capabilities:
 
 ```sql
 CREATE TABLE products (
@@ -195,8 +202,23 @@ CREATE TABLE products (
   name TEXT NOT NULL,
   description TEXT,
   price NUMERIC,
-  image_url TEXT
+  image_url TEXT,
+  search_vector tsvector  -- Pre-computed search vector for performance
 );
+
+-- Full-text search indexes for optimal performance
+CREATE INDEX products_search_vector_idx ON products USING gin(search_vector);
+CREATE INDEX products_name_trgm_idx ON products USING gin(name gin_trgm_ops);
+CREATE INDEX products_description_trgm_idx ON products USING gin(description gin_trgm_ops);
+```
+
+### Search Setup
+
+Run the search indexes script to enable full-text search:
+
+```bash
+# Apply search indexes
+psql -d your_database -f scripts/search-indexes.sql
 ```
 
 Sample data is automatically seeded with 100,000 products for testing. 
