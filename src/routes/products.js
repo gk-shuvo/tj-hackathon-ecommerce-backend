@@ -171,6 +171,7 @@ export default async function productRoutes(fastify, opts) {
                     description: { type: 'string' },
                     price: { type: 'number' },
                     image_url: { type: 'string' },
+                    stock: {type : 'integer'},
                     rank: { type: 'number' }
                   }
                 }
@@ -389,12 +390,14 @@ export default async function productRoutes(fastify, opts) {
                   name: { type: 'string' },
                   description: { type: 'string' },
                   price: { type: 'number' },
-                  image_url: { type: 'string' }
+                  image_url: { type: 'string' },
+                  stock: {type : 'integer'}
                 }
               }
             },
             page: { type: 'integer' },
-            limit: { type: 'integer' }
+            limit: { type: 'integer' },
+            total: {type: 'integer'}
           }
         }
       }
@@ -417,8 +420,9 @@ export default async function productRoutes(fastify, opts) {
         ip: request.ip
       });
 
-      // Generate cache key for this specific query
+      // Generate cache keys
       const cacheKey = `products:page:${page}:limit:${limit}`;
+      const totalCountKey = 'products:total:count';
       
       // Try to get data from Redis cache first
       try {
@@ -442,18 +446,64 @@ export default async function productRoutes(fastify, opts) {
       // Cache miss - fetch from database
       fastify.log.info('Cache miss, fetching from database', { cacheKey, page, limit });
       
-      const result = await executeQuery(
-        fastify,
-        'SELECT * FROM products ORDER BY id LIMIT $1 OFFSET $2',
-        [limit, offset],
-        'fetching products'
-      );
+      // Try to get total count from cache first
+      let total;
+      try {
+        const cachedTotal = await fastify.redis.get(totalCountKey);
+        if (cachedTotal) {
+          total = parseInt(cachedTotal);
+          fastify.log.info('Cache hit for total count', { totalCountKey, total });
+        }
+      } catch (cacheError) {
+        fastify.log.warn('Redis cache error for total count, proceeding with database query', {
+          error: cacheError.message,
+          totalCountKey
+        });
+      }
+
+      // Execute queries (products query always, count query only if not cached)
+      const queries = [
+        executeQuery(
+          fastify,
+          'SELECT * FROM products ORDER BY id LIMIT $1 OFFSET $2',
+          [limit, offset],
+          'fetching products'
+        )
+      ];
+
+      if (!total) {
+        queries.push(
+          executeQuery(
+            fastify,
+            'SELECT COUNT(*) as total FROM products',
+            [],
+            'counting total products'
+          )
+        );
+      }
+
+      const results = await Promise.all(queries);
+      const result = results[0];
+      
+      if (!total) {
+        total = parseInt(results[1].rows[0].total);
+        // Cache total count for 5 minutes (longer than product cache)
+        try {
+          await fastify.redis.set(totalCountKey, total.toString(), 'EX', 300);
+          fastify.log.info('Cached total count', { totalCountKey, total, ttl: 300 });
+        } catch (cacheError) {
+          fastify.log.warn('Failed to cache total count', {
+            error: cacheError.message,
+            totalCountKey
+          });
+        }
+      }
 
       const response = {
         products: result.rows,
         page,
         limit,
-        total: result.rowCount
+        total
       };
 
       // Cache the result in Redis for 60 seconds
@@ -519,28 +569,38 @@ export default async function productRoutes(fastify, opts) {
    * - Product object or 404 if not found
    */
   fastify.get('/:id', {
-    // schema: {
-    //   params: paramsSchema,
-    //   response: {
-    //     200: {
-    //       type: 'object',
-    //       properties: {
-    //         id: { type: 'integer' },
-    //         name: { type: 'string' },
-    //         description: { type: 'string' },
-    //         price: { type: 'number' },
-    //         image_url: { type: 'string' }
-    //       }
-    //     },
-    //     404: {
-    //       type: 'object',
-    //       properties: {
-    //         error: { type: 'string' },
-    //         message: { type: 'string' }
-    //       }
-    //     }
-    //   }
-    // }
+    schema: {
+      params: paramsSchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            name: { type: 'string' },
+            description: { type: 'string' },
+            price: { type: 'number' },
+            image_url: { type: 'string' },
+            stock: { type: 'integer' },
+            brand: { type: 'string' },
+            category: { type: 'string' },
+            currency: { type: 'string' },
+            ean: { type: 'string' },
+            color: { type: 'string' },
+            size: { type: 'string' },
+            availability: { type: 'string' },
+            short_description: { type: 'string' },
+            internal_id: { type: 'string' }
+          }
+        },
+        404: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
   }, async (request, reply) => {
     const startTime = Date.now();
     
@@ -616,7 +676,174 @@ export default async function productRoutes(fastify, opts) {
   });
 
 
+  /**
+   * GET /api/products/latest
+   * Retrieve the latest products (most recently added)
+   * 
+   * Query Parameters:
+   * - limit: Number of latest products to return (default: 10, max: 50)
+   * 
+   * Response:
+   * - products: Array of latest product objects
+   * - limit: Number of products returned
+   * - total: Total number of products available
+   */
+  fastify.get('/latest', {
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          limit: { 
+            type: 'string', 
+            pattern: '^[1-9]\\d*$',
+            description: 'Number of latest products (must be positive integer, max 50)'
+          }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            products: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  name: { type: 'string' },
+                  description: { type: 'string' },
+                  price: { type: 'number' },
+                  image_url: { type: 'string' },
+                  stock: { type: 'integer' },
+                  created_at: { type: 'string' }
+                }
+              }
+            },
+            limit: { type: 'integer' },
+            total: { type: 'integer' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const startTime = Date.now();
+    
+    try {
+      // Validate and sanitize input parameters
+      let limit = parseInt(request.query.limit) || 8;
+      
+      // Validate limit
+      if (limit < 1) {
+        throw new Error('Limit must be greater than 0');
+      }
+      if (limit > 50) {
+        throw new Error('Limit cannot exceed 50 items');
+      }
+      
+      fastify.log.info('Fetching latest products', {
+        limit,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
 
+      // Generate cache key
+      const cacheKey = `products:latest:limit:${limit}`;
+      
+      // Try to get data from Redis cache first
+      try {
+        const cachedData = await fastify.redis.get(cacheKey);
+        if (cachedData) {
+          fastify.log.info('Cache hit for latest products', { cacheKey, limit });
+          const result = JSON.parse(cachedData);
+          
+          reply.header('X-Cache', 'HIT');
+          reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+          
+          return result;
+        }
+      } catch (cacheError) {
+        fastify.log.warn('Redis cache error, proceeding with database query', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      // Cache miss - fetch from database
+      fastify.log.info('Cache miss, fetching latest products from database', { cacheKey, limit });
+      
+      // Get latest products ordered by ID (assuming ID is auto-increment)
+      // If you have a created_at timestamp, use that instead: ORDER BY created_at DESC
+      const result = await executeQuery(
+        fastify,
+        'SELECT id, name, description, price, image_url, stock FROM products ORDER BY id DESC LIMIT $1',
+        [limit],
+        'fetching latest products'
+      );
+
+      // Get total count for reference
+      const countResult = await executeQuery(
+        fastify,
+        'SELECT COUNT(*) as total FROM products',
+        [],
+        'counting total products'
+      );
+
+      const total = parseInt(countResult.rows[0].total);
+      
+      const response = {
+        products: result.rows,
+        limit,
+        total
+      };
+
+      // Cache the result in Redis for 30 seconds (shorter TTL for latest products)
+      try {
+        await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 30);
+        fastify.log.info('Cached latest products data', { cacheKey, ttl: 30 });
+      } catch (cacheError) {
+        fastify.log.warn('Failed to cache latest products data', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      reply.header('X-Cache', 'MISS');
+      reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+      
+      fastify.log.info('Latest products fetched successfully', {
+        count: result.rows.length,
+        limit,
+        responseTime: `${Date.now() - startTime}ms`
+      });
+
+      return response;
+
+    } catch (error) {
+      fastify.log.error('Error fetching latest products:', {
+        error: error.message,
+        stack: error.stack,
+        query: request.query,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      // Determine appropriate error response
+      if (error.message.includes('Limit must be') || 
+          error.message.includes('Limit cannot exceed')) {
+        reply.code(400).send({
+          error: 'Bad Request',
+          message: error.message,
+          details: 'Invalid limit parameter'
+        });
+      } else {
+        reply.code(500).send({
+          error: 'Internal Server Error',
+          message: 'Failed to fetch latest products',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+      }
+    }
+  });
 
 
 }
