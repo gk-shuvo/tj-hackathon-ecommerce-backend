@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS products (
   size TEXT,
   availability TEXT,
   short_description TEXT,
-  image TEXT,
+  image_url TEXT,
   internal_id TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
