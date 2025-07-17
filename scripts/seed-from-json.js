@@ -62,8 +62,8 @@ async function insertProducts(client, products) {
   try {
     // Prepare the insert query
     const insertQuery = `
-      INSERT INTO products (name, description, price, image_url, brand, category, stock, ean, color, size, availability, short_description, internal_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      INSERT INTO products (name, index, description, price, image_url, brand, category, stock, ean, color, size, availability, short_description, internal_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     `;
     
     let insertedCount = 0;
@@ -77,6 +77,7 @@ async function insertProducts(client, products) {
         try {
           await client.query(insertQuery, [
             product.Name,
+            product.Index,
             product.Description,
             product.Price,
             product.Image,
