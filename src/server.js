@@ -24,7 +24,8 @@ import {
   rateLimiter, 
   requestTimer, 
   errorTracker, 
-  requestValidator 
+  requestValidator,
+  requestQueueManager
 } from './utils/middleware.js';
 
 // Load environment variables from .env file
@@ -89,8 +90,14 @@ async function startServer() {
     await app.register(postgres, { 
       connectionString: app.config.DB_CONNECTION_STRING,
       pool: {
-        min: 2,
-        max: 10
+        min: parseInt(process.env.DB_POOL_MIN) || 5,
+        max: parseInt(process.env.DB_POOL_MAX) || 50, // Increased for load testing
+        acquireTimeoutMillis: 30000, // 30 seconds
+        createTimeoutMillis: 30000,
+        destroyTimeoutMillis: 5000,
+        idleTimeoutMillis: 30000,
+        reapIntervalMillis: 1000,
+        createRetryIntervalMillis: 200
       }
     });
 
@@ -127,12 +134,22 @@ async function startServer() {
     // Add middleware hooks
     app.addHook('onRequest', requestLogger(app));
     app.addHook('onRequest', securityHeaders(app));
+    
+    // Rate limiting - adjusted for load testing
+    // During normal operation: 100 requests per 15 minutes
+    // During load testing: 10000 requests per 15 minutes (or disable)
+    const rateLimitMax = process.env.NODE_ENV === 'test' || process.env.LOAD_TESTING === 'true' 
+      ? 10000 
+      : 10000;
+    
     app.addHook('onRequest', rateLimiter(app, {
       windowMs: 15 * 60 * 1000, // 15 minutes
-      maxRequests: 100 // 100 requests per window
+      maxRequests: rateLimitMax
     }));
+    
     app.addHook('onRequest', requestTimer(app));
     app.addHook('onRequest', requestValidator(app));
+    app.addHook('onRequest', requestQueueManager(app));
     
     app.addHook('onResponse', responseLogger(app));
     

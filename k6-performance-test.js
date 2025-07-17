@@ -9,6 +9,9 @@ const cacheHitRate = new Rate('cache_hits');
 const cacheMissRate = new Rate('cache_misses');
 const responseTimeTrend = new Trend('response_time');
 const throughputTrend = new Trend('throughput');
+const queueWaitTime = new Trend('queue_wait_time');
+const queuePosition = new Trend('queue_position');
+const queuedRequests = new Counter('queued_requests');
 
 // Test configuration
 export const options = {
@@ -117,6 +120,27 @@ function checkCacheHeaders(response) {
   }
 }
 
+// Helper function to check queue headers
+function checkQueueHeaders(response) {
+  const queuePositionHeader = response.headers['X-Queue-Position'];
+  const queueWaitTimeHeader = response.headers['X-Queue-Wait-Time'];
+  
+  if (queuePositionHeader) {
+    const position = parseInt(queuePositionHeader);
+    queuePosition.add(position);
+    queuedRequests.add(1);
+    
+    if (position > 0) {
+      console.log(`⚠️ Request was queued at position ${position}`);
+    }
+  }
+  
+  if (queueWaitTimeHeader) {
+    const waitTime = parseInt(queueWaitTimeHeader);
+    queueWaitTime.add(waitTime);
+  }
+}
+
 // Warm-up function - light load to warm up caches
 export function warmup() {
   const endpoints = [
@@ -149,6 +173,7 @@ export function mainTest() {
       const response = http.get(url);
       responseTimeTrend.add(response.timings.duration);
       checkCacheHeaders(response);
+      checkQueueHeaders(response);
       
       const checks = check(response, {
         'products list status is 200': (r) => r.status === 200,
@@ -200,6 +225,7 @@ export function mainTest() {
       const response = http.get(url);
       responseTimeTrend.add(response.timings.duration);
       checkCacheHeaders(response);
+      checkQueueHeaders(response);
       
       const checks = check(response, {
         'search status is 200': (r) => r.status === 200,
@@ -224,6 +250,7 @@ export function mainTest() {
       const response = http.get(url);
       responseTimeTrend.add(response.timings.duration);
       checkCacheHeaders(response);
+      checkQueueHeaders(response);
       
       const checks = check(response, {
         'latest products status is 200': (r) => r.status === 200,
