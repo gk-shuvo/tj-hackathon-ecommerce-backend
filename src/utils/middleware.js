@@ -18,7 +18,7 @@
  */
 export function requestLogger(fastify) {
   return (request, reply, done) => {
-    const startTime = Date.now();
+    const startTime = process.hrtime.bigint();
     
     // Store start time for response logging
     request.startTime = startTime;
@@ -110,7 +110,7 @@ export function securityHeaders(fastify) {
 export function rateLimiter(fastify, options = {}) {
   const {
     windowMs = 15 * 60 * 1000, // 15 minutes
-    maxRequests = 100, // max requests per window
+    maxRequests = 10000, // max requests per window
     skipSuccessfulRequests = false,
     skipFailedRequests = false
   } = options;
@@ -257,5 +257,90 @@ export function requestValidator(fastify) {
     }
     
     done();
+  };
+} 
+
+/**
+ * Request queue management middleware
+ * Handles backpressure and prevents overwhelming the system during high load
+ * @param {Object} fastify - Fastify instance
+ * @param {Object} options - Queue options
+ */
+export function requestQueueManager(fastify, options = {}) {
+  const {
+    maxConcurrentRequests = 1000,
+    queueTimeout = 30000, // 30 seconds
+    enableQueue = process.env.ENABLE_REQUEST_QUEUE === 'true'
+  } = options;
+
+  let activeRequests = 0;
+  const requestQueue = [];
+  let isProcessingQueue = false;
+
+  const processQueue = async () => {
+    if (isProcessingQueue || requestQueue.length === 0) return;
+    
+    isProcessingQueue = true;
+    
+    while (requestQueue.length > 0 && activeRequests < maxConcurrentRequests) {
+      const { request, reply, done, timestamp } = requestQueue.shift();
+      
+      // Check if request has timed out
+      if (Date.now() - timestamp > queueTimeout) {
+        fastify.log.warn('Request timed out in queue', {
+          url: request.url,
+          method: request.method,
+          queueTime: Date.now() - timestamp
+        });
+        
+        reply.code(503).send({
+          error: 'Service Unavailable',
+          message: 'Request timed out in queue'
+        });
+        continue;
+      }
+      
+      activeRequests++;
+      done();
+    }
+    
+    isProcessingQueue = false;
+  };
+
+  return (request, reply, done) => {
+    if (!enableQueue || activeRequests < maxConcurrentRequests) {
+      activeRequests++;
+      done();
+      return;
+    }
+
+    // Add request to queue
+    const queueEntry = {
+      request,
+      reply,
+      done: () => {
+        activeRequests--;
+        processQueue(); // Process next request in queue
+      },
+      timestamp: Date.now()
+    };
+
+    requestQueue.push(queueEntry);
+    
+    // Add queue position header
+    reply.header('X-Queue-Position', requestQueue.length);
+    reply.header('X-Queue-Wait-Time', Date.now() - queueEntry.timestamp);
+    
+    fastify.log.info('Request queued', {
+      url: request.url,
+      method: request.method,
+      queuePosition: requestQueue.length,
+      activeRequests
+    });
+
+    // Process queue if not already processing
+    if (!isProcessingQueue) {
+      processQueue();
+    }
   };
 } 
