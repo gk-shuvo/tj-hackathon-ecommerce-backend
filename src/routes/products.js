@@ -252,6 +252,7 @@ export default async function productRoutes(fastify, opts) {
             description, 
             price, 
             image_url,
+            stock,
             ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
           FROM products 
           WHERE search_vector @@ plainto_tsquery('english', $1)
