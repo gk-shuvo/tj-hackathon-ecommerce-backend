@@ -49,12 +49,12 @@ export const config = {
   },
 
   // Rate limiting configuration
-  rateLimit: {
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-    maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-    skipSuccessfulRequests: process.env.RATE_LIMIT_SKIP_SUCCESS === 'true',
-    skipFailedRequests: process.env.RATE_LIMIT_SKIP_FAILED === 'true'
-  },
+  // rateLimit: {
+  //   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  //   maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  //   skipSuccessfulRequests: process.env.RATE_LIMIT_SKIP_SUCCESS === 'true',
+  //   skipFailedRequests: process.env.RATE_LIMIT_SKIP_FAILED === 'true'
+  // },
 
   // Cache configuration
   cache: {

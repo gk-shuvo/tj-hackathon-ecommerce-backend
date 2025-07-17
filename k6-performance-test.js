@@ -87,7 +87,7 @@ const searchTerms = [
 ];
 
 // Global variables
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000';
+const BASE_URL = __ENV.BASE_URL || 'http://34.47.133.225:3000';
 const API_BASE = `${BASE_URL}/api/products`;
 
 // Helper function to get random product ID

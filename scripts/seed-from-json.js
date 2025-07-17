@@ -43,6 +43,8 @@ async function clearProducts(client) {
   try {
     const result = await client.query('DELETE FROM products');
     console.log(`✅ Cleared ${result.rowCount} existing products`);
+    await client.query('ALTER SEQUENCE products_id_seq RESTART WITH 1');
+    console.log('✅ Reset products_id_seq');
   } catch (error) {
     console.error('❌ Error clearing products:', error.message);
     throw error;

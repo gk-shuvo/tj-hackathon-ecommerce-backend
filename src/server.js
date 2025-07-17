@@ -138,14 +138,14 @@ async function startServer() {
     // Rate limiting - adjusted for load testing
     // During normal operation: 100 requests per 15 minutes
     // During load testing: 10000 requests per 15 minutes (or disable)
-    const rateLimitMax = process.env.NODE_ENV === 'test' || process.env.LOAD_TESTING === 'true' 
-      ? 10000 
-      : 10000;
+    // const rateLimitMax = process.env.NODE_ENV === 'test' || process.env.LOAD_TESTING === 'true' 
+    //   ? 10000 
+    //   : 10000;
     
-    app.addHook('onRequest', rateLimiter(app, {
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      maxRequests: rateLimitMax
-    }));
+    // app.addHook('onRequest', rateLimiter(app, {
+    //   windowMs: 15 * 60 * 1000, // 15 minutes
+    //   maxRequests: rateLimitMax
+    // }));
     
     app.addHook('onRequest', requestTimer(app));
     app.addHook('onRequest', requestValidator(app));
