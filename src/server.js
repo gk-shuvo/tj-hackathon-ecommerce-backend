@@ -18,6 +18,7 @@ import redisPlugin from './plugins/redis.js';
 import productRoutes from './routes/products.js';
 import categoryRoutes from './routes/categories.js';
 import healthRoutes from './routes/health.js';
+import statisticsRoutes from './routes/statistics.js';
 import { 
   requestLogger, 
   responseLogger, 
@@ -113,6 +114,9 @@ async function startServer() {
 
     // Register health check routes
     await app.register(healthRoutes, { prefix: '/health' });
+
+    // Register statistics routes with API prefix
+    await app.register(statisticsRoutes, { prefix: '/api/statistics' });
 
     // Add global error handler
     app.setErrorHandler((error, request, reply) => {

@@ -1,3 +1,5 @@
+import { executeQuery } from '../utils/database.js';
+
 /**
  * Product routes module
  * 
@@ -100,33 +102,7 @@ function validateSearchParams(query) {
   return { page, limit, search };
 }
 
-/**
- * Utility function to execute database queries with proper error handling
- * @param {Object} fastify - Fastify instance
- * @param {string} query - SQL query string
- * @param {Array} params - Query parameters
- * @param {string} operation - Description of the operation for logging
- * @returns {Promise<Object>} Query result
- */
-async function executeQuery(fastify, query, params, operation) {
-  return new Promise((resolve, reject) => {
-    fastify.pg.query(query, params, (err, result) => {
-      if (err) {
-        fastify.log.error(`Database error during ${operation}:`, {
-          error: err.message,
-          code: err.code,
-          detail: err.detail,
-          hint: err.hint,
-          query: query,
-          params: params
-        });
-        reject(new Error(`Database operation failed: ${err.message}`));
-      } else {
-        resolve(result);
-      }
-    });
-  });
-}
+
 
 /**
  * Main product routes function
