@@ -3,8 +3,9 @@
  * 
  * Handles all product-related API endpoints including:
  * - GET /api/products - Retrieve paginated product list with caching
- * - GET /api/products/:id - Retrieve specific product by ID
- * - GET /api/products/search - Search products using PostgreSQL full-text search
+ * - GET /api/products/:index - Retrieve specific product by Index
+ * - GET /api/products/search - Search products by index
+ * - Get /api/products/category/:categoryName - Retrieve products by category name
  * 
  * Features:
  * - Redis caching for improved performance
@@ -32,11 +33,10 @@ const querySchema = {
       pattern: '^[1-9]\\d*$',
       description: 'Items per page (must be positive integer, max 100)'
     },
-    search: {
+    q: {
       type: 'string',
-      minLength: 1,
-      maxLength: 100,
-      description: 'Search term for product name and description'
+      pattern: '^[1-9]\\d*$',
+      description: 'Index number to search for (must be positive integer)'
     }
   }
 };
@@ -44,13 +44,13 @@ const querySchema = {
 const paramsSchema = {
   type: 'object',
   properties: {
-    id: { 
+    index: { 
       type: 'string', 
       pattern: '^[1-9]\\d*$',
-      description: 'Product ID (must be positive integer)'
+      description: 'Product Index (must be positive integer)'
     }
   },
-  required: ['id']
+  required: ['index']
 };
 
 /**
@@ -85,17 +85,16 @@ function validatePaginationParams(query) {
  */
 function validateSearchParams(query) {
 
-  console.log("Inside validateSearchParams >> ", query.search);
+  console.log("Inside validateSearchParams >> ", query.q);
   const { page, limit } = validatePaginationParams(query);
-  const search = query.search ? query.search.trim() : null;
+  const search = query.q ? query.q.trim() : null;
   
-  // Validate search term
-  if (search !== null && search.length < 1) {
-    throw new Error('Search term cannot be empty');
-  }
-  
-  if (search !== null && search.length > 100) {
-    throw new Error('Search term cannot exceed 100 characters');
+  // Validate search term (index number)
+  if (search !== null) {
+    const indexNumber = parseInt(search);
+    if (isNaN(indexNumber) || indexNumber < 1) {
+      throw new Error('Search term must be a positive integer (index number)');
+    }
   }
   
   return { page, limit, search };
@@ -140,19 +139,19 @@ export default async function productRoutes(fastify, opts) {
 
     /**
    * GET /api/products/search
-   * Search products using PostgreSQL full-text search
+   * Search products by index number
    * 
    * Query Parameters:
-   * - search: Search term for product name and description
+   * - search: Index number to search for (positive integer)
    * - page: Page number (default: 1)
    * - limit: Items per page (default: 10, max: 100)
    * 
    * Response:
-   * - products: Array of product objects matching search criteria
+   * - products: Array of product objects matching the index
    * - page: Current page number
    * - limit: Items per page
    * - total: Total number of matching products
-   * - searchTerm: The search term used
+   * - searchTerm: The index number searched
    */
     fastify.get('/search', {
       schema: {
@@ -167,12 +166,15 @@ export default async function productRoutes(fastify, opts) {
                   type: 'object',
                   properties: {
                     id: { type: 'integer' },
+                    index: { type: 'integer' },
                     name: { type: 'string' },
                     description: { type: 'string' },
                     price: { type: 'number' },
+                    category: { type: 'string' },
+                    brand: { type: 'string' },
                     image_url: { type: 'string' },
-                    stock: {type : 'integer'},
-                    rank: { type: 'number' }
+                    stock: { type: 'integer' },
+                    internal_id: { type: 'string' }
                   }
                 }
               },
@@ -205,13 +207,31 @@ export default async function productRoutes(fastify, opts) {
           reply.code(400).send({
             error: 'Bad Request',
             message: 'Search term is required',
-            details: 'Please provide a search term using the "search" query parameter'
+            details: 'Please provide an index number using the "q" query parameter'
+          });
+          return;
+        }
+
+        // Validate that search term is a positive integer (index number)
+        const indexNumber = parseInt(search);
+        if (isNaN(indexNumber) || indexNumber < 1) {
+          fastify.log.warn('Invalid index number provided', {
+            search,
+            userAgent: request.headers['user-agent'],
+            ip: request.ip
+          });
+          
+          reply.code(400).send({
+            error: 'Bad Request',
+            message: 'Search term must be a positive integer (index number)',
+            details: 'Please provide a valid index number'
           });
           return;
         }
         
-        fastify.log.info('Searching products', {
+        fastify.log.info('Searching products by index', {
           searchTerm: search,
+          indexNumber,
           page,
           limit,
           offset,
@@ -220,13 +240,13 @@ export default async function productRoutes(fastify, opts) {
         });
   
         // Generate cache key for this specific search query
-        const cacheKey = `products:search:${encodeURIComponent(search)}:page:${page}:limit:${limit}`;
+        const cacheKey = `products:search:index:${indexNumber}:page:${page}:limit:${limit}`;
         
         // Try to get data from Redis cache first
         try {
           const cachedData = await fastify.redis.get(cacheKey);
           if (cachedData) {
-            fastify.log.info('Cache hit for product search', { cacheKey, searchTerm: search, page, limit });
+            fastify.log.info('Cache hit for product search by index', { cacheKey, searchTerm: search, page, limit });
             const result = JSON.parse(cachedData);
             
             reply.header('X-Cache', 'HIT');
@@ -241,45 +261,48 @@ export default async function productRoutes(fastify, opts) {
           });
         }
   
-        // Cache miss - perform full-text search in database
-        fastify.log.info('Cache miss, performing database search', { cacheKey, searchTerm: search, page, limit });
+        // Cache miss - search by index in database
+        fastify.log.info('Cache miss, performing database search by index', { cacheKey, searchTerm: search, page, limit });
         
-        // Use PostgreSQL full-text search with pre-computed search vector for optimal performance
+        // Search by index number
         const searchQuery = `
           SELECT 
             id, 
+            index,
             name, 
             description, 
             price, 
+            category,
+            brand,
             image_url,
             stock,
-            ts_rank(search_vector, plainto_tsquery('english', $1)) as rank
+            internal_id
           FROM products 
-          WHERE search_vector @@ plainto_tsquery('english', $1)
-          ORDER BY rank DESC, name ASC
+          WHERE index = $1
+          ORDER BY index ASC
           LIMIT $2 OFFSET $3
         `;
         
         const countQuery = `
           SELECT COUNT(*) as total
           FROM products 
-          WHERE search_vector @@ plainto_tsquery('english', $1)
+          WHERE index = $1
         `;
   
         // Execute search query
         const result = await executeQuery(
           fastify,
           searchQuery,
-          [search, limit, offset],
-          'searching products'
+          [indexNumber, limit, offset],
+          'searching products by index'
         );
   
         // Get total count for pagination
         const countResult = await executeQuery(
           fastify,
           countQuery,
-          [search],
-          'counting search results'
+          [indexNumber],
+          'counting search results by index'
         );
   
         const total = parseInt(countResult.rows[0].total);
@@ -295,9 +318,9 @@ export default async function productRoutes(fastify, opts) {
         // Cache the result in Redis for 60 seconds
         try {
           await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 60);
-          fastify.log.info('Cached search results', { cacheKey, ttl: 60, searchTerm: search });
+          fastify.log.info('Cached search results by index', { cacheKey, ttl: 60, searchTerm: search });
         } catch (cacheError) {
-          fastify.log.warn('Failed to cache search results', {
+          fastify.log.warn('Failed to cache search results by index', {
             error: cacheError.message,
             cacheKey
           });
@@ -306,7 +329,7 @@ export default async function productRoutes(fastify, opts) {
         reply.header('X-Cache', 'MISS');
         reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
         
-        fastify.log.info('Product search completed successfully', {
+        fastify.log.info('Product search by index completed successfully', {
           searchTerm: search,
           count: result.rows.length,
           total,
@@ -318,7 +341,7 @@ export default async function productRoutes(fastify, opts) {
         return response;
   
       } catch (error) {
-        fastify.log.error('Error searching products:', {
+        fastify.log.error('Error searching products by index:', {
           error: error.message,
           stack: error.stack,
           query: request.query,
@@ -339,7 +362,7 @@ export default async function productRoutes(fastify, opts) {
         } else {
           reply.code(500).send({
             error: 'Internal Server Error',
-            message: 'Failed to search products',
+            message: 'Failed to search products by index',
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
           });
         }
@@ -388,24 +411,26 @@ export default async function productRoutes(fastify, opts) {
                 type: 'object',
                 properties: {
                   id: { type: 'integer' },
+                  index: { type: 'integer' },
                   name: { type: 'string' },
-                  description: { type: 'string' },
                   price: { type: 'number' },
+                  category: { type: 'string' },
+                  brand: { type: 'string' },
                   image_url: { type: 'string' },
-                  stock: {type : 'integer'}
+                  stock: { type: 'integer' },
+                  internal_id: { type: 'string' },
                 }
               }
             },
             page: { type: 'integer' },
             limit: { type: 'integer' },
-            total: {type: 'integer'}
+            total: { type: 'integer' }
           }
         }
       }
     }
   }, async (request, reply) => {
 
-    console.log("Inside products >> ", request.query);
     const startTime = Date.now();
     
     try {
@@ -466,7 +491,7 @@ export default async function productRoutes(fastify, opts) {
       const queries = [
         executeQuery(
           fastify,
-          'SELECT * FROM products ORDER BY id LIMIT $1 OFFSET $2',
+          'SELECT * FROM products ORDER BY index LIMIT $1 OFFSET $2',
           [limit, offset],
           'fetching products'
         )
@@ -560,16 +585,16 @@ export default async function productRoutes(fastify, opts) {
 
 
   /**
-   * GET /api/products/:id
-   * Retrieve a specific product by ID
+   * GET /api/products/:index
+   * Retrieve a specific product by Index
    * 
    * Parameters:
-   * - id: Product ID (positive integer)
+   * - id: Product Index (positive integer)
    * 
    * Response:
    * - Product object or 404 if not found
    */
-  fastify.get('/:id', {
+  fastify.get('/:index', {
     schema: {
       params: paramsSchema,
       response: {
@@ -577,6 +602,7 @@ export default async function productRoutes(fastify, opts) {
           type: 'object',
           properties: {
             id: { type: 'integer' },
+            index: { type: 'integer' },
             name: { type: 'string' },
             description: { type: 'string' },
             price: { type: 'number' },
@@ -606,43 +632,43 @@ export default async function productRoutes(fastify, opts) {
     const startTime = Date.now();
     
     try {
-      const { id } = request.params;
+      const { index } = request.params;
       
       // Validate ID parameter
-      const productId = parseInt(id);
-      if (isNaN(productId) || productId < 1) {
+      const productIndex = parseInt(index);
+      if (isNaN(productIndex) || productIndex < 1) {
         fastify.log.warn('Invalid product ID provided', {
-          id,
+          index,
           userAgent: request.headers['user-agent'],
           ip: request.ip
         });
         
         reply.code(400).send({
           error: 'Bad Request',
-          message: 'Product ID must be a positive integer'
+          message: 'Product Index must be a positive integer'
         });
         return;
       }
 
-      fastify.log.info('Fetching product by ID', {
-        productId,
+      fastify.log.info('Fetching product by Index', {
+        productIndex,
         userAgent: request.headers['user-agent'],
         ip: request.ip
       });
 
       const result = await executeQuery(
         fastify,
-        'SELECT * FROM products WHERE id = $1',
-        [productId],
-        'fetching product by ID'
+        'SELECT * FROM products WHERE index = $1',
+        [productIndex],
+        'fetching product by Index'
       );
 
       if (!result.rows.length) {
-        fastify.log.info('Product not found', { productId });
+        fastify.log.info('Product not found', { productIndex });
         
         reply.code(404).send({
           error: 'Not Found',
-          message: `Product with ID ${productId} not found`
+          message: `Product with Index ${productIndex} not found`
         });
         return;
       }
@@ -652,7 +678,7 @@ export default async function productRoutes(fastify, opts) {
       reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
       
       fastify.log.info('Product fetched successfully', {
-        productId,
+        productIndex,
         productName: product.name,
         responseTime: `${Date.now() - startTime}ms`
       });
@@ -660,7 +686,7 @@ export default async function productRoutes(fastify, opts) {
       return product;
 
     } catch (error) {
-      fastify.log.error('Error fetching product by ID:', {
+      fastify.log.error('Error fetching product by Index:', {
         error: error.message,
         stack: error.stack,
         params: request.params,
@@ -711,12 +737,14 @@ export default async function productRoutes(fastify, opts) {
                 type: 'object',
                 properties: {
                   id: { type: 'integer' },
+                  index: { type: 'integer' },
                   name: { type: 'string' },
-                  description: { type: 'string' },
                   price: { type: 'number' },
+                  category: { type: 'string' },
+                  brand: { type: 'string' },
                   image_url: { type: 'string' },
                   stock: { type: 'integer' },
-                  created_at: { type: 'string' }
+                  internal_id: { type: 'string' },
                 }
               }
             },
@@ -776,7 +804,7 @@ export default async function productRoutes(fastify, opts) {
       // If you have a created_at timestamp, use that instead: ORDER BY created_at DESC
       const result = await executeQuery(
         fastify,
-        'SELECT id, name, description, price, image_url, stock FROM products ORDER BY id DESC LIMIT $1',
+        'SELECT id, index, name, category, brand, price, image_url, stock, internal_id FROM products ORDER BY index DESC LIMIT $1',
         [limit],
         'fetching latest products'
       );
@@ -843,6 +871,233 @@ export default async function productRoutes(fastify, opts) {
           details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
       }
+    }
+  });
+
+
+
+
+  /**
+   * GET /api/products/category/:categoryName
+   * Retrieve 4 products from a specific category
+   * 
+   * Parameters:
+   * - categoryName: Name of the category to filter by
+   * 
+   * Response:
+   * - products: Array of up to 4 product objects from the specified category
+   * - category: The category name that was searched
+   * - count: Number of products returned
+   */
+  fastify.get('/category/:categoryName', {
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          categoryName: { 
+            type: 'string',
+            minLength: 1,
+            maxLength: 50,
+            description: 'Category name to filter products by'
+          }
+        },
+        required: ['categoryName']
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            products: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  index: { type: 'integer' },
+                  name: { type: 'string' },
+                  price: { type: 'number' },
+                  category: { type: 'string' },
+                  brand: { type: 'string' },
+                  image_url: { type: 'string' },
+                  stock: { type: 'integer' },
+                  internal_id: { type: 'string' },
+                }
+              }
+            },
+                         category: { type: 'string' },
+             count: { type: 'integer' },
+             categoryMatches: { type: 'integer' },
+             randomProducts: { type: 'integer' }
+           }
+         },
+        404: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+            message: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const startTime = Date.now();
+    
+    try {
+      const { categoryName } = request.params;
+      
+      // Validate and sanitize category name
+      const cleanCategoryName = categoryName.trim();
+      if (!cleanCategoryName) {
+        fastify.log.warn('Empty category name provided', {
+          categoryName,
+          userAgent: request.headers['user-agent'],
+          ip: request.ip
+        });
+        
+        reply.code(400).send({
+          error: 'Bad Request',
+          message: 'Category name cannot be empty'
+        });
+        return;
+      }
+
+      fastify.log.info('Fetching products by category', {
+        categoryName: cleanCategoryName,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      // Generate cache key
+      const cacheKey = `products:category:${encodeURIComponent(cleanCategoryName.toLowerCase())}:limit:5`;
+      
+      // Try to get data from Redis cache first
+      try {
+        const cachedData = await fastify.redis.get(cacheKey);
+        if (cachedData) {
+          fastify.log.info('Cache hit for products by category', { cacheKey, categoryName: cleanCategoryName });
+          const result = JSON.parse(cachedData);
+          
+          reply.header('X-Cache', 'HIT');
+          reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+          
+          return result;
+        }
+      } catch (cacheError) {
+        fastify.log.warn('Redis cache error, proceeding with database query', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      // Cache miss - fetch from database
+      fastify.log.info('Cache miss, fetching products by category from database', { 
+        cacheKey, 
+        categoryName: cleanCategoryName 
+      });
+      
+      // Query products by category (case-insensitive) limited to 4 items
+      const result = await executeQuery(
+        fastify,
+        'SELECT id, index, name, category, brand, price, image_url, stock, internal_id FROM products WHERE LOWER(category) = LOWER($1) ORDER BY index LIMIT 5',
+        [cleanCategoryName],
+        'fetching products by category'
+      );
+
+      let products = result.rows;
+      let needsRandomProducts = products.length < 5;
+
+      // If we found fewer than 5 products, get random products to fill up to 5
+      if (needsRandomProducts) {
+        const productsNeeded = 5 - products.length;
+        
+        fastify.log.info('Found fewer than 5 products in category, fetching random products', {
+          categoryName: cleanCategoryName,
+          foundInCategory: products.length,
+          randomProductsNeeded: productsNeeded
+        });
+
+        // Get random products excluding the ones we already have and the category we searched
+        const excludeIds = products.map(p => p.id);
+        const excludeClause = excludeIds.length > 0 ? 'AND id != ALL($2)' : '';
+        const queryParams = excludeIds.length > 0 ? [cleanCategoryName, excludeIds, productsNeeded] : [cleanCategoryName, productsNeeded];
+        
+        const randomResult = await executeQuery(
+          fastify,
+          `SELECT id, index, name, category, brand, price, image_url, stock, internal_id 
+           FROM products 
+           WHERE LOWER(category) != LOWER($1) ${excludeClause}
+           ORDER BY RANDOM() 
+           LIMIT $${excludeIds.length > 0 ? '3' : '2'}`,
+          queryParams,
+          'fetching random products to supplement category results'
+        );
+
+        // Combine category products with random products
+        products = [...products, ...randomResult.rows];
+
+        fastify.log.info('Added random products to supplement category results', {
+          categoryName: cleanCategoryName,
+          categoryProducts: result.rows.length,
+          randomProducts: randomResult.rows.length,
+          totalProducts: products.length
+        });
+      }
+
+      // If still no products found (edge case where database is empty)
+      if (!products.length) {
+        fastify.log.info('No products found in database', { categoryName: cleanCategoryName });
+        
+        reply.code(404).send({
+          error: 'Not Found',
+          message: `No products found in category '${cleanCategoryName}' and no other products available`
+        });
+        return;
+      }
+
+      const response = {
+        products: products,
+        category: cleanCategoryName,
+        count: products.length,
+        categoryMatches: result.rows.length,
+        randomProducts: needsRandomProducts ? products.length - result.rows.length : 0
+      };
+
+      // Cache the result in Redis for 60 seconds
+      try {
+        await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 60);
+        fastify.log.info('Cached products by category data', { cacheKey, ttl: 60 });
+      } catch (cacheError) {
+        fastify.log.warn('Failed to cache products by category data', {
+          error: cacheError.message,
+          cacheKey
+        });
+      }
+
+      reply.header('X-Cache', 'MISS');
+      reply.header('X-Response-Time', `${Date.now() - startTime}ms`);
+      
+      fastify.log.info('Products by category fetched successfully', {
+        categoryName: cleanCategoryName,
+        count: result.rows.length,
+        responseTime: `${Date.now() - startTime}ms`
+      });
+
+      return response;
+
+    } catch (error) {
+      fastify.log.error('Error fetching products by category:', {
+        error: error.message,
+        stack: error.stack,
+        params: request.params,
+        userAgent: request.headers['user-agent'],
+        ip: request.ip
+      });
+
+      reply.code(500).send({
+        error: 'Internal Server Error',
+        message: 'Failed to fetch products by category',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 

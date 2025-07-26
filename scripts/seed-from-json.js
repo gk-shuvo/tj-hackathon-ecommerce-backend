@@ -52,6 +52,71 @@ async function clearProducts(client) {
 }
 
 /**
+ * Clear all existing categories from the database
+ * @param {Object} client - Database client
+ */
+async function clearCategories(client) {
+  console.log('🗑️  Clearing existing categories...');
+  
+  try {
+    const result = await client.query('DELETE FROM categories');
+    console.log(`✅ Cleared ${result.rowCount} existing categories`);
+    await client.query('ALTER SEQUENCE categories_id_seq RESTART WITH 1');
+    console.log('✅ Reset categories_id_seq');
+  } catch (error) {
+    console.error('❌ Error clearing categories:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Extract unique categories from products and insert into categories table
+ * @param {Object} client - Database client
+ * @param {Array} products - Array of product objects
+ */
+async function insertCategories(client, products) {
+  console.log('📂 Extracting unique categories...');
+  
+  try {
+    // Extract unique categories
+    const categorySet = new Set();
+    products.forEach(product => {
+      if (product.Category && product.Category.trim()) {
+        categorySet.add(product.Category.trim());
+      }
+    });
+    
+    const uniqueCategories = Array.from(categorySet).sort();
+    console.log(`📊 Found ${uniqueCategories.length} unique categories`);
+    
+    // Insert categories
+    const insertQuery = 'INSERT INTO categories (name) VALUES ($1)';
+    let insertedCount = 0;
+    
+    for (const category of uniqueCategories) {
+      try {
+        await client.query(insertQuery, [category]);
+        insertedCount++;
+        console.log(`✅ Inserted category: ${category}`);
+      } catch (error) {
+        if (error.code === '23505') { // Unique violation
+          console.log(`⚠️  Category already exists: ${category}`);
+        } else {
+          console.error(`❌ Error inserting category ${category}:`, error.message);
+        }
+      }
+    }
+    
+    console.log(`✅ Successfully inserted ${insertedCount} categories`);
+    return insertedCount;
+    
+  } catch (error) {
+    console.error('❌ Error inserting categories:', error.message);
+    throw error;
+  }
+}
+
+/**
  * Insert products from JSON file into database
  * @param {Object} client - Database client
  * @param {Array} products - Array of product objects
@@ -175,19 +240,28 @@ async function main() {
     // Update schema if needed
     await updateSchema(client);
     
-    // Clear existing products
+    // Clear existing data
+    await clearCategories(client);
     await clearProducts(client);
     
+    // Insert categories first
+    const insertedCategoriesCount = await insertCategories(client, products);
+    
     // Insert new products
-    const insertedCount = await insertProducts(client, products);
+    const insertedProductsCount = await insertProducts(client, products);
     
     // Verify the insertion
-    const countResult = await client.query('SELECT COUNT(*) FROM products');
-    const totalProducts = parseInt(countResult.rows[0].count);
+    const productCountResult = await client.query('SELECT COUNT(*) FROM products');
+    const totalProducts = parseInt(productCountResult.rows[0].count);
+    
+    const categoryCountResult = await client.query('SELECT COUNT(*) FROM categories');
+    const totalCategories = parseInt(categoryCountResult.rows[0].count);
     
     console.log('\n🎉 Seeding completed successfully!');
+    console.log(`📊 Total categories in database: ${totalCategories}`);
     console.log(`📊 Total products in database: ${totalProducts}`);
-    console.log(`✅ Products inserted: ${insertedCount}`);
+    console.log(`✅ Categories inserted: ${insertedCategoriesCount}`);
+    console.log(`✅ Products inserted: ${insertedProductsCount}`);
     
   } catch (error) {
     console.error('❌ Seeding failed:', error.message);

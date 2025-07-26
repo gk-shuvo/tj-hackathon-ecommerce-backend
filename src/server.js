@@ -16,6 +16,7 @@ import fastifyEnv from '@fastify/env';
 import postgres from '@fastify/postgres';
 import redisPlugin from './plugins/redis.js';
 import productRoutes from './routes/products.js';
+import categoryRoutes from './routes/categories.js';
 import healthRoutes from './routes/health.js';
 import { 
   requestLogger, 
@@ -106,6 +107,9 @@ async function startServer() {
 
     // Register product routes with API prefix
     await app.register(productRoutes, { prefix: '/api/products' });
+
+    // Register category routes with API prefix
+    await app.register(categoryRoutes, { prefix: '/api/categories' });
 
     // Register health check routes
     await app.register(healthRoutes, { prefix: '/health' });
