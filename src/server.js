@@ -93,7 +93,7 @@ async function startServer() {
       connectionString: app.config.DB_CONNECTION_STRING,
       pool: {
         min: parseInt(process.env.DB_POOL_MIN) || 5,
-        max: parseInt(process.env.DB_POOL_MAX) || 50, // Increased for load testing
+        max: parseInt(process.env.DB_POOL_MAX) || 80, // Increased for load testing
         acquireTimeoutMillis: 30000, // 30 seconds
         createTimeoutMillis: 30000,
         destroyTimeoutMillis: 5000,
